@@ -1,216 +1,335 @@
 #Subgroup 2
-# File checks before spatial processing (run from repository root).
-
-required <- c(
-  "data/raw/iris_paris.geojson",
-  "data/raw/filosofi_2021.csv",
-  "data/raw/espaces_verts.geojson",
-  "data/raw/arbres.geojson"
-)
-
-print(data.frame(file = required, present = file.exists(required)))
-if (!all(file.exists(required))) {
-  stop("Missing inputs in data/raw/. Download and rename them as documented in README.md.")
-}
 
 library(sf)
 library(readr)
 
-iris_preview  <- st_read(required[1], quiet = TRUE)
-green_preview <- st_read(required[3], quiet = TRUE)
-trees_preview <- st_read(required[4], quiet = TRUE)
-filo_preview <- read_delim(required[2], delim = ";", n_max = 5,
-                           col_types = cols(.default = col_character()))
+paths <- c(
+  iris  = "data/raw/iris_paris.geojson",
+  income = "data/raw/filosofi_2021.csv",
+  green = "data/raw/espaces_verts.geojson",
+  trees = "data/raw/arbres.geojson"
+)
 
-cat("\nIRIS fields:\n"); print(names(iris_preview))
-cat("\nFilosofi fields:\n"); print(names(filo_preview))
-cat("\nGreen-space fields:\n"); print(names(green_preview))
-cat("\nTree fields:\n"); print(names(trees_preview))
-cat("\nCRS:\n")
-print(st_crs(iris_preview)); print(st_crs(green_preview)); print(st_crs(trees_preview))
+checks <- data.frame(
+  dataset = names(paths),
+  path = unname(paths),
+  exists = file.exists(paths),
+  size_mb = ifelse(file.exists(paths),
+                   round(file.info(paths)$size / 1024^2, 1), NA_real_)
+)
+print(checks, row.names = FALSE)
+if (!all(checks$exists)) {
+  stop("Missing raw files. See README_subgroup2.md and use getwd() to check the repository root.")
+}
 
-# Build one row per Paris IRIS: income, selected public green-space %, tree density.
-# Run from the shared repository's root after checking input column names.
+iris <- st_read(paths["iris"], quiet = TRUE)
+filo <- read_delim(paths["income"], delim = ";", n_max = 10,
+                   col_types = cols(.default = col_character()),
+                   show_col_types = FALSE)
+green <- st_read(paths["green"], quiet = TRUE)
+trees <- st_read(paths["trees"], quiet = TRUE)
+
+inspect_spatial <- function(x, name) {
+  cat("\n----", name, "----\n")
+  cat("Rows:", nrow(x), "\n")
+  cat("CRS:", st_crs(x)$input, "\n")
+  cat("Geometries:", paste(unique(as.character(st_geometry_type(x))), collapse = ", "), "\n")
+  cat("Columns:\n")
+  print(names(x))
+}
+inspect_spatial(iris, "IRIS boundaries")
+inspect_spatial(green, "Green spaces")
+inspect_spatial(trees, "Trees")
+cat("\n---- Filosofi (first 10 records) ----\n")
+print(names(filo))
+print(filo[seq_len(min(nrow(filo), 5)), , drop = FALSE])
+
+# Inspect categorical fields to identify the exact official green-space typology.
+text_cols <- names(st_drop_geometry(green))[
+  vapply(st_drop_geometry(green), function(z) is.character(z) || is.factor(z), logical(1))
+]
+cat("\nPossible green-space typology fields:\n")
+for (nm in text_cols) {
+  vals <- as.character(green[[nm]])
+  matches <- grepl("Promenades ouvertes", vals, fixed = TRUE, ignore.case = TRUE)
+  if (any(matches, na.rm = TRUE)) {
+    cat("Field:", nm, "| matches:", sum(matches, na.rm = TRUE), "\n")
+    print(head(sort(unique(vals[matches])), 10))
+  }
+}
+cat("\nNext: confirm the matching typology field and edit GREEN_TYPE_COL in 01_build_subgroup2.R.\n")
+
+--
 
 library(sf)
 library(dplyr)
 library(readr)
-library(tidyr)
 
-# ---- A. Input settings: edit these ONLY if your downloaded files differ ----
-IRIS_ID_COL <- "CODE_IRIS"       # change if the polygon file uses a different field
-INCOME_ID_COL <- "IRIS"          # change if Filosofi uses CODE_IRIS or another ID
-INCOME_VALUE_COL <- "DISP_MED21" # median disposable income per consumption unit
-FILOSOFI_DELIM <- ";"           # typically ';' in French INSEE CSV exports
+# ---- A. Configuration. Verify using 00_check_data.R ----
+IRIS_ID_COL <- "CODE_IRIS"
+INCOME_ID_COL <- "IRIS"
+INCOME_VALUE_COL <- "DISP_MED21"
+FILOSOFI_DELIM <- ";"
 
-paths <- c("data/raw/iris_paris.geojson", "data/raw/filosofi_2021.csv",
-           "data/raw/espaces_verts.geojson", "data/raw/arbres.geojson")
-stopifnot(all(file.exists(paths)))
+# Explicitly set the name of the field for "Typologie d'espace vert"
+# after inspecting `names(green)` in 00_check_data.R.
+# For safety, a missing or incorrect field causes an informative error.
+GREEN_TYPE_COL <- NA_character_  # Auto-detect if exactly one field has the official category
+GREEN_KEEP_VALUES <- c("Promenades ouvertes")
 
+paths <- c(
+  iris = "data/raw/iris_paris.geojson",
+  income = "data/raw/filosofi_2021.csv",
+  green = "data/raw/espaces_verts.geojson",
+  trees = "data/raw/arbres.geojson"
+)
+if (!all(file.exists(paths))) stop("Missing data/raw/ files. Run 00_check_data.R first.")
 dir.create("data/processed", recursive = TRUE, showWarnings = FALSE)
 
-# ---- B. Read raw datasets ----
-iris <- st_read(paths[1], quiet = TRUE)
-filo <- read_delim(paths[2], delim = FILOSOFI_DELIM,
-                   col_types = cols(.default = col_character()),
-                   show_col_types = FALSE)
-green <- st_read(paths[3], quiet = TRUE)
-trees <- st_read(paths[4], quiet = TRUE)
-
-for (check in list(c(IRIS_ID_COL, names(iris)), c(INCOME_ID_COL, names(filo)),
-                   c(INCOME_VALUE_COL, names(filo)))) {
-  if (!check[1] %in% check[-1]) {
-    stop(paste("Missing column:", check[1], "— inspect names() in 00_check_data.R"))
+assert_field <- function(data, field, dataset) {
+  if (!field %in% names(data)) {
+    stop(dataset, ": expected column '", field, "' not found. Available columns: ",
+         paste(names(data), collapse = ", "))
   }
 }
+assert_crs <- function(x, dataset) {
+  if (is.na(st_crs(x))) stop(dataset, " has no CRS: assign the correct source CRS before transforming.")
+}
 
-# ---- C. Harmonise Paris IRIS geography and join 2021 income ----
-iris <- iris %>%
-  mutate(CODE_IRIS = as.character(.data[[IRIS_ID_COL]])) %>%
-  filter(startsWith(CODE_IRIS, "75")) %>%
+# ---- B. Read sources and check inputs ----
+iris_raw <- st_read(paths["iris"], quiet = TRUE)
+filo_raw <- read_delim(paths["income"], delim = FILOSOFI_DELIM,
+                       col_types = cols(.default = col_character()),
+                       show_col_types = FALSE)
+green_raw <- st_read(paths["green"], quiet = TRUE)
+trees_raw <- st_read(paths["trees"], quiet = TRUE)
+
+assert_field(iris_raw, IRIS_ID_COL, "IRIS")
+assert_field(filo_raw, INCOME_ID_COL, "Filosofi")
+assert_field(filo_raw, INCOME_VALUE_COL, "Filosofi")
+for (nm in c("IRIS", "Green spaces", "Trees")) {
+  obj <- switch(nm, "IRIS" = iris_raw, "Green spaces" = green_raw, "Trees" = trees_raw)
+  assert_crs(obj, nm)
+}
+
+# ---- C. Clean Paris IRIS boundaries (metric CRS) ----
+iris <- iris_raw %>%
+  mutate(CODE_IRIS = trimws(as.character(.data[[IRIS_ID_COL]]))) %>%
+  filter(grepl("^75[0-9]{7}$", CODE_IRIS)) %>%
   st_transform(2154) %>%
   st_make_valid()
 
-if (anyDuplicated(iris$CODE_IRIS) > 0) stop("Duplicate IRIS identifiers in polygons.")
+if (nrow(iris) == 0) stop("No Paris IRIS found: inspect codes and input geography.")
+if (anyDuplicated(iris$CODE_IRIS)) stop("Duplicated IRIS polygon IDs.")
+if (!all(as.character(st_geometry_type(iris)) %in% c("POLYGON", "MULTIPOLYGON"))) {
+  stop("IRIS geometry must consist of polygons only.")
+}
+if (any(st_is_empty(iris))) stop("Empty IRIS geometries detected.")
 
-income <- filo %>%
+# ---- D. Join 2021 disposable median incomes ----
+# Allow French thousands spaces, nonbreaking spaces, and decimal commas.
+parse_french_number <- function(z) {
+  z <- gsub("[\u00a0\u202f[:space:]]", "", as.character(z), perl = TRUE)
+  suppressWarnings(parse_number(z, locale = locale(decimal_mark = ",", grouping_mark = ".")))
+}
+income <- filo_raw %>%
   transmute(
-    CODE_IRIS = as.character(.data[[INCOME_ID_COL]]),
-    income_med_2021 = parse_number(as.character(.data[[INCOME_VALUE_COL]]),
-                                   locale = locale(decimal_mark = ","))
+    CODE_IRIS = trimws(as.character(.data[[INCOME_ID_COL]])),
+    income_med_2021 = parse_french_number(.data[[INCOME_VALUE_COL]])
   ) %>%
-  filter(startsWith(CODE_IRIS, "75"))
+  filter(CODE_IRIS %in% iris$CODE_IRIS)
 
-if (anyDuplicated(income$CODE_IRIS) > 0) stop("Duplicate IRIS identifiers in income dataset.")
+if (anyDuplicated(income$CODE_IRIS)) stop("Duplicated Filosofi IRIS codes: identify the correct table.")
+missing_income_ids <- setdiff(iris$CODE_IRIS, income$CODE_IRIS)
+if (length(missing_income_ids) > 0) {
+  warning(length(missing_income_ids), " IRIS geometries have no matching Filosofi row.")
+}
 
 iris <- iris %>%
-  left_join(income, by = "CODE_IRIS") %>%
+  left_join(income, by = "CODE_IRIS", relationship = "one-to-one") %>%
   mutate(area_m2 = as.numeric(st_area(geometry)),
          area_ha = area_m2 / 10000)
-
-# ---- D. Green spaces: choose a strict definition of public open gardens ----
-# The source also includes cemeteries, private gardens, decorative vegetation, etc.
-# Find a text field containing the official category 'Promenades ouvertes'.
-green <- green %>% st_transform(2154) %>% st_make_valid()
-possible_type_cols <- names(st_drop_geometry(green))[
-  vapply(st_drop_geometry(green), function(v) {
-    any(grepl("promenades ouvertes", as.character(v), ignore.case = TRUE), na.rm = TRUE)
-  }, logical(1))
-]
-if (length(possible_type_cols) == 0) {
-  stop("Cannot identify the green-space category column. Inspect names(green) / unique values before filtering.")
+if (any(iris$area_m2 <= 0 | !is.finite(iris$area_m2))) {
+  stop("IRIS area must be positive and finite.")
 }
-message("Public-green-space category column: ", possible_type_cols[1])
 
-green_open <- green[
-  grepl("promenades ouvertes", as.character(green[[possible_type_cols[1]]]),
-        ignore.case = TRUE) & !is.na(green[[possible_type_cols[1]]]),
-]
+# ---- E. Parks and public gardens: explicitly selected category ----
+green <- green_raw %>% st_transform(2154) %>% st_make_valid()
+if (is.na(GREEN_TYPE_COL)) {
+  candidate_fields <- names(st_drop_geometry(green))[
+    vapply(st_drop_geometry(green), function(col) {
+      vals <- tolower(trimws(as.character(col)))
+      any(vals %in% tolower(GREEN_KEEP_VALUES), na.rm = TRUE)
+    }, logical(1))
+  ]
+  if (length(candidate_fields) != 1L) {
+    stop("Cannot identify ONE green-space type field; candidates are: ",
+         paste(candidate_fields, collapse = ", "),
+         ". Inspect 00_check_data.R and set GREEN_TYPE_COL explicitly.")
+  }
+  GREEN_TYPE_COL <- candidate_fields[[1]]
+}
+assert_field(green, GREEN_TYPE_COL, "Green spaces")
+message("Green-space category field: ", GREEN_TYPE_COL)
+if (!all(as.character(st_geometry_type(green)) %in% c("POLYGON", "MULTIPOLYGON"))) {
+  stop("Green-space geometry must be polygonal. Check the download format.")
+}
+actual_category <- trimws(as.character(green[[GREEN_TYPE_COL]]))
+keep <- !is.na(actual_category) & tolower(actual_category) %in% tolower(GREEN_KEEP_VALUES)
+green_open <- green[keep, , drop = FALSE]
+if (nrow(green_open) == 0) {
+  stop("No green polygons matched. Check GREEN_TYPE_COL and GREEN_KEEP_VALUES.")
+}
+message("Selected ", nrow(green_open), " public-green-space polygons from category: ",
+        paste(GREEN_KEEP_VALUES, collapse = ", "))
 
-# Union to avoid double-counting overlapping green-space polygons.
+# Dissolve overlaps first, intersect with each IRIS, and measure clipped polygons.
 green_union <- st_sf(geometry = st_union(st_geometry(green_open)))
-
 green_parts <- suppressWarnings(st_intersection(
   iris %>% select(CODE_IRIS), green_union
 ))
-
 green_by_iris <- green_parts %>%
   mutate(green_m2 = as.numeric(st_area(geometry))) %>%
   st_drop_geometry() %>%
   group_by(CODE_IRIS) %>%
   summarise(green_m2 = sum(green_m2), .groups = "drop")
 
-# ---- E. Trees: count each mapped municipal tree inside an IRIS ----
-trees <- trees %>% st_transform(2154) %>% st_make_valid()
-tree_points <- st_sf(geometry = st_geometry(trees))
-
-trees_by_iris <- st_join(tree_points, iris %>% select(CODE_IRIS),
-                         join = st_within, left = FALSE) %>%
-  st_drop_geometry() %>%
+# ---- F. Tree points: one point assigned to at most one IRIS ----
+trees <- trees_raw %>% st_transform(2154)
+if (!all(as.character(st_geometry_type(trees)) == "POINT")) {
+  stop("Trees layer must contain POINT features. Inspect its geometry or convert carefully.")
+}
+# st_within gives an empty match for an outside/boundary point, counted in QA.
+within_iris <- st_within(trees, iris)
+matched <- lengths(within_iris) == 1L
+ambiguous <- lengths(within_iris) > 1L
+if (any(ambiguous)) stop("Some tree points match more than one IRIS: inspect polygon overlaps.")
+assigned_ids <- iris$CODE_IRIS[vapply(within_iris[matched], `[`, integer(1), 1L)]
+trees_by_iris <- tibble(CODE_IRIS = assigned_ids) %>%
   count(CODE_IRIS, name = "n_trees")
 
-# ---- F. Final indicators; missing income stays NA ----
+# ---- G. Calculate indicators and checks ----
 iris_result <- iris %>%
-  left_join(green_by_iris, by = "CODE_IRIS") %>%
-  left_join(trees_by_iris, by = "CODE_IRIS") %>%
+  left_join(green_by_iris, by = "CODE_IRIS", relationship = "one-to-one") %>%
+  left_join(trees_by_iris, by = "CODE_IRIS", relationship = "one-to-one") %>%
   mutate(
     green_m2 = coalesce(green_m2, 0),
     n_trees = coalesce(n_trees, 0L),
     green_pct = 100 * green_m2 / area_m2,
+    green_m2_per_ha = green_m2 / area_ha,
     trees_per_ha = n_trees / area_ha,
     income_quintile = ntile(income_med_2021, 5)
   )
 
-stopifnot(nrow(iris_result) == nrow(iris))
-message("Paris IRIS: ", nrow(iris_result),
-        "; missing income: ", sum(is.na(iris_result$income_med_2021)),
-        "; tree count: ", sum(iris_result$n_trees))
-print(summary(st_drop_geometry(iris_result)[,
-  c("income_med_2021", "green_pct", "trees_per_ha")]))
+if (nrow(iris_result) != nrow(iris)) stop("Spatial joins duplicated or dropped IRIS rows.")
+if (any(iris_result$green_pct < -1e-6 | iris_result$green_pct > 100 + 1e-6)) {
+  stop("Green area share outside 0–100%; investigate intersections and CRS.")
+}
+if (any(iris_result$n_trees < 0)) stop("Invalid negative tree counts.")
 
-st_write(iris_result, "data/processed/iris_subgroup2.geojson",
+quality_checks <- tibble(
+  indicator = c("n_IRIS", "n_IRIS_missing_income", "n_IRIS_no_filosofi_row",
+                "n_selected_green_polygons", "n_trees_source", "n_trees_assigned",
+                "n_trees_unassigned", "mean_green_pct", "mean_trees_per_ha"),
+  value = c(nrow(iris_result), sum(is.na(iris_result$income_med_2021)),
+            length(missing_income_ids), nrow(green_open), nrow(trees),
+            sum(matched), sum(!matched),
+            mean(iris_result$green_pct), mean(iris_result$trees_per_ha))
+)
+print(quality_checks)
+
+quintile_summary <- iris_result %>%
+  st_drop_geometry() %>%
+  filter(!is.na(income_quintile)) %>%
+  group_by(income_quintile) %>%
+  summarise(n_iris = n(),
+            median_income = median(income_med_2021, na.rm = TRUE),
+            median_green_pct = median(green_pct, na.rm = TRUE),
+            median_trees_per_ha = median(trees_per_ha, na.rm = TRUE),
+            .groups = "drop")
+print(quintile_summary)
+
+# ---- H. Save processed data and diagnostic tables ----
+st_write(st_transform(iris_result, 4326), "data/processed/iris_subgroup2.geojson",
          delete_dsn = TRUE, quiet = TRUE)
 write_csv(st_drop_geometry(iris_result), "data/processed/iris_subgroup2.csv")
+write_csv(quality_checks, "data/processed/quality_checks_subgroup2.csv")
+write_csv(quintile_summary, "data/processed/income_quintile_summary.csv")
+message("Created IRIS-level files in data/processed/.")
 
-# Run from repository root *after* scripts/01_build_subgroup2.R.
+--
 
 library(sf)
 library(dplyr)
 library(ggplot2)
 
-
-
-file <- "data/processed/iris_subgroup2.geojson"
-stopifnot(file.exists(file))
-x <- st_read(file, quiet = TRUE)
-
+input <- "data/processed/iris_subgroup2.geojson"
+if (!file.exists(input)) stop("Run scripts/01_build_subgroup2.R first.")
+x <- st_read(input, quiet = TRUE) %>% st_transform(2154)
 dir.create("maps/subgroup2", recursive = TRUE, showWarnings = FALSE)
 
-base_theme <- theme_void() + theme(
-  plot.title = element_text(face = "bold", size = 14),
-  plot.subtitle = element_text(size = 10),
-  legend.position = "right"
-)
+base_theme <- theme_void(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", size = 15),
+    plot.subtitle = element_text(size = 10),
+    plot.caption = element_text(size = 8, color = "grey35"),
+    legend.position = "right",
+    plot.margin = margin(12, 12, 12, 12)
+  )
 
-# Map 1: income quintiles in 2021
+save_map <- function(map, filename) {
+  ggsave(file.path("maps/subgroup2", filename), plot = map,
+         width = 10, height = 8, dpi = 300, bg = "white")
+}
+
+# ---- Map 1: income gradient by IRIS ----
+x$income_group <- factor(x$income_quintile, levels = 1:5,
+                         labels = paste0("Q", 1:5))
 m_income <- ggplot(x) +
-  geom_sf(aes(fill = factor(income_quintile)), linewidth = 0.05, color = "white") +
-  scale_fill_brewer(palette = "Blues", na.value = "grey85",
-                    name = "Income quintile", labels = paste("Q", 1:5)) +
-  labs(title = "Median disposable income in Paris",
-       subtitle = "IRIS income quintiles, 2021 (Filosofi / INSEE)") +
+  geom_sf(aes(fill = income_group), color = "white", linewidth = 0.08) +
+  scale_fill_brewer(palette = "Blues", drop = FALSE,
+                    na.value = "grey85", name = "Income quintile") +
+  labs(title = "Median disposable income across Paris",
+       subtitle = "IRIS quintiles, from Q1 (lowest) to Q5 (highest), 2021",
+       caption = "Source: INSEE Filosofi 2021; IRIS geographical boundaries") +
   coord_sf(datum = NA) + base_theme
+save_map(m_income, "01_income_quintiles.png")
 
-ggsave("maps/subgroup2/01_income_quintiles.png", m_income,
-       width = 10, height = 8, dpi = 300, bg = "white")
-
-# Map 2: surface of publicly accessible open gardens as a share of IRIS area
+# ---- Map 2: open public parks/gardens as a share of IRIS area ----
 m_green <- ggplot(x) +
-  geom_sf(aes(fill = green_pct), linewidth = 0.05, color = "white") +
-  scale_fill_viridis_c(name = "Public green space (%)", option = "viridis") +
-  labs(title = "Open public green space in Paris",
-       subtitle = "Share of IRIS surface covered by open public parks and gardens") +
+  geom_sf(aes(fill = green_pct), color = "white", linewidth = 0.08) +
+  scale_fill_viridis_c(option = "viridis", na.value = "grey85",
+                       name = "Open parks and\ngardens (%)") +
+  labs(title = "Open public green spaces across Paris",
+       subtitle = "Share of IRIS area covered by selected 'Promenades ouvertes' polygons",
+       caption = "Source: City of Paris Open Data, 'Espaces verts et assimilés' (download date to document)") +
   coord_sf(datum = NA) + base_theme
+save_map(m_green, "02_public_green_share.png")
 
-ggsave("maps/subgroup2/02_public_green_share.png", m_green,
-       width = 10, height = 8, dpi = 300, bg = "white")
-
-# Map 3: relative density of *mapped municipal trees* (not all trees)
-x_pt <- st_point_on_surface(x)
+# ---- Map 3: income quintiles + tree density ----
+# Point on surface remains inside each IRIS even for nonconvex shapes.
+x_point <- st_point_on_surface(x)
 m_trees <- ggplot() +
-  geom_sf(data = x, aes(fill = factor(income_quintile)),
-          color = "grey80", linewidth = 0.1) +
-  geom_sf(data = x_pt, aes(size = trees_per_ha),
-          color = "#C44E52", alpha = 0.7) +
-  scale_fill_brewer(palette = "Blues", na.value = "grey85", name = "Income quintile") +
-  scale_size_area(max_size = 10, name = "Municipal trees / ha") +
+  geom_sf(data = x, aes(fill = income_group),
+          color = "grey75", linewidth = 0.07) +
+  geom_sf(data = x_point, aes(size = trees_per_ha),
+          color = "#B64043", alpha = 0.6) +
+  scale_fill_brewer(palette = "Blues", drop = FALSE,
+                    na.value = "grey85", name = "Income quintile") +
+  scale_size_area(max_size = 6, name = "Recorded municipal\ntrees per hectare") +
   labs(title = "Income and recorded municipal tree density",
-       subtitle = "Tree points aggregated by IRIS; current tree inventory") +
+       subtitle = "Tree locations aggregated to IRIS; circle area represents trees/ha",
+       caption = "Sources: INSEE Filosofi 2021 and City of Paris tree inventory (inventory date to document)") +
   coord_sf(datum = NA) + base_theme
-
-ggsave("maps/subgroup2/03_trees_and_income.png", m_trees,
-       width = 10, height = 8, dpi = 300, bg = "white")
+save_map(m_trees, "03_trees_and_income.png")
 
 print(m_income)
 print(m_green)
 print(m_trees)
+message("Maps saved in maps/subgroup2/.")
+
+--
+
+
+
+     
