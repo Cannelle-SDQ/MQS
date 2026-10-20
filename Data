@@ -1,0 +1,18 @@
+# Contours IRIS de Paris
+https://data.iledefrance.fr/explore/dataset/iris/export/
+-> Format GeoJSON
+Pour une correspondance temporelle plus rigoureuse avec Filosofi, utiliser plutôt les contours IGN 2022 et extraire Paris.
+
+# Revenus disponibles 2021 — Filosofi
+https://www.insee.fr/fr/statistiques/8229323
+-> Format CSV
+Il faudra sélectionner les IRIS commençant par 75.
+
+# Espaces verts et assimilés
+https://opendata.paris.fr/explore/dataset/espaces_verts/export/?disjunctive.type_ev&disjunctive.categorie&disjunctive.adresse_codepostal&disjunctive.presence_cloture
+-> Format GeoJSON
+on pourra sélectionner la catégorie « Promenades ouvertes ».
+
+#Arbres de Paris
+https://opendata.paris.fr/explore/dataset/les-arbres/export/?disjunctive.espece&disjunctive.typeemplacement&disjunctive.arrondissement&disjunctive.genre&disjunctive.libellefrancais&disjunctive.varieteoucultivar&disjunctive.stadedeveloppement&disjunctive.remarquable
+-> Format GeoJSON
