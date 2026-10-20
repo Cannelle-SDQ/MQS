@@ -1,1 +1,216 @@
 #Subgroup 2
+# File checks before spatial processing (run from repository root).
+
+required <- c(
+  "data/raw/iris_paris.geojson",
+  "data/raw/filosofi_2021.csv",
+  "data/raw/espaces_verts.geojson",
+  "data/raw/arbres.geojson"
+)
+
+print(data.frame(file = required, present = file.exists(required)))
+if (!all(file.exists(required))) {
+  stop("Missing inputs in data/raw/. Download and rename them as documented in README.md.")
+}
+
+library(sf)
+library(readr)
+
+iris_preview  <- st_read(required[1], quiet = TRUE)
+green_preview <- st_read(required[3], quiet = TRUE)
+trees_preview <- st_read(required[4], quiet = TRUE)
+filo_preview <- read_delim(required[2], delim = ";", n_max = 5,
+                           col_types = cols(.default = col_character()))
+
+cat("\nIRIS fields:\n"); print(names(iris_preview))
+cat("\nFilosofi fields:\n"); print(names(filo_preview))
+cat("\nGreen-space fields:\n"); print(names(green_preview))
+cat("\nTree fields:\n"); print(names(trees_preview))
+cat("\nCRS:\n")
+print(st_crs(iris_preview)); print(st_crs(green_preview)); print(st_crs(trees_preview))
+
+# Build one row per Paris IRIS: income, selected public green-space %, tree density.
+# Run from the shared repository's root after checking input column names.
+
+library(sf)
+library(dplyr)
+library(readr)
+library(tidyr)
+
+# ---- A. Input settings: edit these ONLY if your downloaded files differ ----
+IRIS_ID_COL <- "CODE_IRIS"       # change if the polygon file uses a different field
+INCOME_ID_COL <- "IRIS"          # change if Filosofi uses CODE_IRIS or another ID
+INCOME_VALUE_COL <- "DISP_MED21" # median disposable income per consumption unit
+FILOSOFI_DELIM <- ";"           # typically ';' in French INSEE CSV exports
+
+paths <- c("data/raw/iris_paris.geojson", "data/raw/filosofi_2021.csv",
+           "data/raw/espaces_verts.geojson", "data/raw/arbres.geojson")
+stopifnot(all(file.exists(paths)))
+
+dir.create("data/processed", recursive = TRUE, showWarnings = FALSE)
+
+# ---- B. Read raw datasets ----
+iris <- st_read(paths[1], quiet = TRUE)
+filo <- read_delim(paths[2], delim = FILOSOFI_DELIM,
+                   col_types = cols(.default = col_character()),
+                   show_col_types = FALSE)
+green <- st_read(paths[3], quiet = TRUE)
+trees <- st_read(paths[4], quiet = TRUE)
+
+for (check in list(c(IRIS_ID_COL, names(iris)), c(INCOME_ID_COL, names(filo)),
+                   c(INCOME_VALUE_COL, names(filo)))) {
+  if (!check[1] %in% check[-1]) {
+    stop(paste("Missing column:", check[1], "— inspect names() in 00_check_data.R"))
+  }
+}
+
+# ---- C. Harmonise Paris IRIS geography and join 2021 income ----
+iris <- iris %>%
+  mutate(CODE_IRIS = as.character(.data[[IRIS_ID_COL]])) %>%
+  filter(startsWith(CODE_IRIS, "75")) %>%
+  st_transform(2154) %>%
+  st_make_valid()
+
+if (anyDuplicated(iris$CODE_IRIS) > 0) stop("Duplicate IRIS identifiers in polygons.")
+
+income <- filo %>%
+  transmute(
+    CODE_IRIS = as.character(.data[[INCOME_ID_COL]]),
+    income_med_2021 = parse_number(as.character(.data[[INCOME_VALUE_COL]]),
+                                   locale = locale(decimal_mark = ","))
+  ) %>%
+  filter(startsWith(CODE_IRIS, "75"))
+
+if (anyDuplicated(income$CODE_IRIS) > 0) stop("Duplicate IRIS identifiers in income dataset.")
+
+iris <- iris %>%
+  left_join(income, by = "CODE_IRIS") %>%
+  mutate(area_m2 = as.numeric(st_area(geometry)),
+         area_ha = area_m2 / 10000)
+
+# ---- D. Green spaces: choose a strict definition of public open gardens ----
+# The source also includes cemeteries, private gardens, decorative vegetation, etc.
+# Find a text field containing the official category 'Promenades ouvertes'.
+green <- green %>% st_transform(2154) %>% st_make_valid()
+possible_type_cols <- names(st_drop_geometry(green))[
+  vapply(st_drop_geometry(green), function(v) {
+    any(grepl("promenades ouvertes", as.character(v), ignore.case = TRUE), na.rm = TRUE)
+  }, logical(1))
+]
+if (length(possible_type_cols) == 0) {
+  stop("Cannot identify the green-space category column. Inspect names(green) / unique values before filtering.")
+}
+message("Public-green-space category column: ", possible_type_cols[1])
+
+green_open <- green[
+  grepl("promenades ouvertes", as.character(green[[possible_type_cols[1]]]),
+        ignore.case = TRUE) & !is.na(green[[possible_type_cols[1]]]),
+]
+
+# Union to avoid double-counting overlapping green-space polygons.
+green_union <- st_sf(geometry = st_union(st_geometry(green_open)))
+
+green_parts <- suppressWarnings(st_intersection(
+  iris %>% select(CODE_IRIS), green_union
+))
+
+green_by_iris <- green_parts %>%
+  mutate(green_m2 = as.numeric(st_area(geometry))) %>%
+  st_drop_geometry() %>%
+  group_by(CODE_IRIS) %>%
+  summarise(green_m2 = sum(green_m2), .groups = "drop")
+
+# ---- E. Trees: count each mapped municipal tree inside an IRIS ----
+trees <- trees %>% st_transform(2154) %>% st_make_valid()
+tree_points <- st_sf(geometry = st_geometry(trees))
+
+trees_by_iris <- st_join(tree_points, iris %>% select(CODE_IRIS),
+                         join = st_within, left = FALSE) %>%
+  st_drop_geometry() %>%
+  count(CODE_IRIS, name = "n_trees")
+
+# ---- F. Final indicators; missing income stays NA ----
+iris_result <- iris %>%
+  left_join(green_by_iris, by = "CODE_IRIS") %>%
+  left_join(trees_by_iris, by = "CODE_IRIS") %>%
+  mutate(
+    green_m2 = coalesce(green_m2, 0),
+    n_trees = coalesce(n_trees, 0L),
+    green_pct = 100 * green_m2 / area_m2,
+    trees_per_ha = n_trees / area_ha,
+    income_quintile = ntile(income_med_2021, 5)
+  )
+
+stopifnot(nrow(iris_result) == nrow(iris))
+message("Paris IRIS: ", nrow(iris_result),
+        "; missing income: ", sum(is.na(iris_result$income_med_2021)),
+        "; tree count: ", sum(iris_result$n_trees))
+print(summary(st_drop_geometry(iris_result)[,
+  c("income_med_2021", "green_pct", "trees_per_ha")]))
+
+st_write(iris_result, "data/processed/iris_subgroup2.geojson",
+         delete_dsn = TRUE, quiet = TRUE)
+write_csv(st_drop_geometry(iris_result), "data/processed/iris_subgroup2.csv")
+
+# Run from repository root *after* scripts/01_build_subgroup2.R.
+
+library(sf)
+library(dplyr)
+library(ggplot2)
+
+
+
+file <- "data/processed/iris_subgroup2.geojson"
+stopifnot(file.exists(file))
+x <- st_read(file, quiet = TRUE)
+
+dir.create("maps/subgroup2", recursive = TRUE, showWarnings = FALSE)
+
+base_theme <- theme_void() + theme(
+  plot.title = element_text(face = "bold", size = 14),
+  plot.subtitle = element_text(size = 10),
+  legend.position = "right"
+)
+
+# Map 1: income quintiles in 2021
+m_income <- ggplot(x) +
+  geom_sf(aes(fill = factor(income_quintile)), linewidth = 0.05, color = "white") +
+  scale_fill_brewer(palette = "Blues", na.value = "grey85",
+                    name = "Income quintile", labels = paste("Q", 1:5)) +
+  labs(title = "Median disposable income in Paris",
+       subtitle = "IRIS income quintiles, 2021 (Filosofi / INSEE)") +
+  coord_sf(datum = NA) + base_theme
+
+ggsave("maps/subgroup2/01_income_quintiles.png", m_income,
+       width = 10, height = 8, dpi = 300, bg = "white")
+
+# Map 2: surface of publicly accessible open gardens as a share of IRIS area
+m_green <- ggplot(x) +
+  geom_sf(aes(fill = green_pct), linewidth = 0.05, color = "white") +
+  scale_fill_viridis_c(name = "Public green space (%)", option = "viridis") +
+  labs(title = "Open public green space in Paris",
+       subtitle = "Share of IRIS surface covered by open public parks and gardens") +
+  coord_sf(datum = NA) + base_theme
+
+ggsave("maps/subgroup2/02_public_green_share.png", m_green,
+       width = 10, height = 8, dpi = 300, bg = "white")
+
+# Map 3: relative density of *mapped municipal trees* (not all trees)
+x_pt <- st_point_on_surface(x)
+m_trees <- ggplot() +
+  geom_sf(data = x, aes(fill = factor(income_quintile)),
+          color = "grey80", linewidth = 0.1) +
+  geom_sf(data = x_pt, aes(size = trees_per_ha),
+          color = "#C44E52", alpha = 0.7) +
+  scale_fill_brewer(palette = "Blues", na.value = "grey85", name = "Income quintile") +
+  scale_size_area(max_size = 10, name = "Municipal trees / ha") +
+  labs(title = "Income and recorded municipal tree density",
+       subtitle = "Tree points aggregated by IRIS; current tree inventory") +
+  coord_sf(datum = NA) + base_theme
+
+ggsave("maps/subgroup2/03_trees_and_income.png", m_trees,
+       width = 10, height = 8, dpi = 300, bg = "white")
+
+print(m_income)
+print(m_green)
+print(m_trees)
