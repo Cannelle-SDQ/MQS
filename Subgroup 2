@@ -258,6 +258,25 @@ write_csv(quintile_summary, "data/processed/income_quintile_summary.csv")
 message("Created IRIS-level files in data/processed/.")
 
 --
+# Relationship between income and green spaces
+cor.test(
+  iris_result$income_med_2021,
+  iris_result$green_pct,
+  method = "spearman",
+  use = "complete.obs",
+  exact = FALSE
+)
+
+# Relationship between income and tree density
+cor.test(
+  iris_result$income_med_2021,
+  iris_result$trees_per_ha,
+  method = "spearman",
+  use = "complete.obs",
+  exact = FALSE
+)
+
+--
 
 library(sf)
 library(dplyr)
