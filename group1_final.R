@@ -144,18 +144,20 @@ ggplot() +
           aes(fill = trees_density),
           color = "white",
           size = 0.05) +
-  scale_fill_distiller(type = "seq",
-                       palette = "Greens",
-                       direction = 1,
-                       trans = "sqrt",
-                       name = "Trees density (Count per 100m²)") +
+  scale_fill_gradientn(
+    colours = c("#F0F4E9", "#D9E7CC", "#BBD5A5",
+                "#94BD7C", "#6F9F59"),
+    trans = "sqrt",
+    name = "Trees density (Count per 100m²)"
+  ) +
   geom_sf(data = symbols,
           aes(size = classe, color = classe),
-          shape = 21, fill = NA, stroke = 0.7) +
-  scale_size_manual(values = c(0.8, 1.6, 2.6, 3.8, 5.2),   
+          shape = 21, fill = NA, stroke = 0.8) +
+  scale_size_manual(values = c(0.8, 1.6, 2.6, 3.8, 5.2),
                     name = "Median price (€/m²)") +
-  scale_color_manual(values = c("#9e9ac8", "#807dba", "#6a51a3", "#54278f", "#3f007d"),
-                     name = "Median price (€/m²)")+
+  scale_color_manual(values = c("#D5A0A5", "#C17A83", "#A34E5D",
+                                "#803344", "#57212F"),
+                     name = "Median price (€/m²)") +
   theme_void() +
   theme(
     legend.position = "right",
@@ -167,24 +169,77 @@ ggplot() +
 
 ggsave("Maps/trees_density.png", units = "cm", width=40, height=25)
 
+# TREES HEATMAP
+
+# Get the coordinates from the geometry
+trees_xy <- trees %>%
+  st_coordinates()
+
+# Kernel density estimation
+kde <- MASS::kde2d(trees_xy[, 1], trees_xy[, 2], n = 300)
+kde_df <- expand.grid(x = kde$x, y = kde$y)
+kde_df$z <- as.vector(kde$z)
+
+# Keep only the grid cells inside Paris
+paris <- st_union(st_make_valid(iris))
+kde_pts <- st_as_sf(kde_df, coords = c("x", "y"), crs = 2154, remove = FALSE)
+kde_df <- kde_df[st_intersects(kde_pts, paris, sparse = FALSE)[, 1], ]
+
+# Heat map of trees + proportional symbols of housing values
+ggplot() +
+  geom_raster(data = kde_df, aes(x = x, y = y, fill = z)) +
+  scale_fill_gradientn(
+    colours = c("#F0F4E9", "#D9E7CC", "#BBD5A5",
+                "#94BD7C", "#6F9F59"),
+    trans = "sqrt",
+    breaks = range(kde_df$z),
+    labels = c("low", "high"),
+    name = "Tree density"
+  ) +
+  geom_sf(data = paris, fill = NA, color = "grey30", linewidth = 0.2) +
+  geom_sf(data = iris_joined,
+          color = "white",
+          fill = NA,
+          size = 0.05) +
+  geom_sf(data = symbols,
+          aes(size = classe, color = classe),
+          shape = 21, fill = NA, stroke = 0.8) +
+  scale_size_manual(values = c(0.8, 1.6, 2.6, 3.8, 5.2),
+                    name = "Median price (€/m²)") +
+  scale_color_manual(values = c("#D5A0A5", "#C17A83", "#A34E5D",
+                                "#803344", "#57212F"),
+                     name = "Median price (€/m²)") +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    legend.key.height = unit(0.7, "cm"),
+    legend.key.width = unit(0.5, "cm"),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 13)
+  ) 
+
+ggsave("Maps/trees_heatmap.png", units = "cm", width=40, height=25)
+
 # GREEN SPACE SHARE
 ggplot() +
   geom_sf(data = iris_joined,
           aes(fill = share_gs),
           color = "white",
           size = 0.05) +
-  scale_fill_distiller(type = "seq",
-                       palette = "Greens",
-                       direction = 1, 
-                       trans = "sqrt",
-                       name = "Green space area (% of IRIS area)") +
+  scale_fill_gradientn(
+    colours = c("#F0F4E9", "#D9E7CC", "#BBD5A5",
+                "#94BD7C", "#6F9F59"),
+    trans = "sqrt",
+    name = "Green space area (% of IRIS area)"
+  ) +
   geom_sf(data = symbols,
           aes(size = classe, color = classe),
-          shape = 21, fill = NA, stroke = 0.7) +
-  scale_size_manual(values = c(0.8, 1.6, 2.6, 3.8, 5.2),   
+          shape = 21, fill = NA, stroke = 0.8) +
+  scale_size_manual(values = c(0.8, 1.6, 2.6, 3.8, 5.2),
                     name = "Median price (€/m²)") +
-  scale_color_manual(values = c("#9e9ac8", "#807dba", "#6a51a3", "#54278f", "#3f007d"),
-                     name = "Median price (€/m²)")+
+  scale_color_manual(values = c("#D5A0A5", "#C17A83", "#A34E5D",
+                                "#803344", "#57212F"),
+                     name = "Median price (€/m²)") +
   theme_void() +
   theme(
     legend.position = "right",
@@ -195,6 +250,3 @@ ggplot() +
   )
 
 ggsave("Maps/green_spaces.png", units = "cm", width=40, height=25)
-
-
-
