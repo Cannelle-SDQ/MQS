@@ -165,7 +165,7 @@ ggplot() +
     legend.title = element_text(size = 13)
   )
 
-ggsave("Plots/trees_density.png", units = "cm", width=40, height=25)
+ggsave("Maps/trees_density.png", units = "cm", width=40, height=25)
 
 # GREEN SPACE SHARE
 ggplot() +
@@ -194,7 +194,7 @@ ggplot() +
     legend.title = element_text(size = 13)
   )
 
-ggsave("Plots/green_spaces.png", units = "cm", width=40, height=25)
+ggsave("Maps/green_spaces.png", units = "cm", width=40, height=25)
 
 
 
