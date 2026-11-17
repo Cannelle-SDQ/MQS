@@ -148,7 +148,7 @@ ggplot() +
                        palette = "Greens",
                        direction = 1,
                        trans = "sqrt",
-                       name = "Trees density (Count per 100m2)") +
+                       name = "Trees density (Count per 100m²)") +
   geom_sf(data = symbols,
           aes(size = classe, color = classe),
           shape = 21, fill = NA, stroke = 0.7) +
@@ -156,7 +156,16 @@ ggplot() +
                     name = "Median price (€/m²)") +
   scale_color_manual(values = c("#9e9ac8", "#807dba", "#6a51a3", "#54278f", "#3f007d"),
                      name = "Median price (€/m²)")+
-  theme_void()
+  theme_void() +
+  theme(
+    legend.position = "right",
+    legend.key.height = unit(0.7, "cm"),
+    legend.key.width = unit(0.5, "cm"),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 13)
+  )
+
+ggsave("Plots/trees_density.png", units = "cm", width=40, height=25)
 
 # GREEN SPACE SHARE
 ggplot() +
@@ -167,6 +176,7 @@ ggplot() +
   scale_fill_distiller(type = "seq",
                        palette = "Greens",
                        direction = 1, 
+                       trans = "sqrt",
                        name = "Green space area (% of IRIS area)") +
   geom_sf(data = symbols,
           aes(size = classe, color = classe),
@@ -175,6 +185,16 @@ ggplot() +
                     name = "Median price (€/m²)") +
   scale_color_manual(values = c("#9e9ac8", "#807dba", "#6a51a3", "#54278f", "#3f007d"),
                      name = "Median price (€/m²)")+
-  theme_void()
+  theme_void() +
+  theme(
+    legend.position = "right",
+    legend.key.height = unit(0.7, "cm"),
+    legend.key.width = unit(0.5, "cm"),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 13)
+  )
+
+ggsave("Plots/green_spaces.png", units = "cm", width=40, height=25)
+
 
 
